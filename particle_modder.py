@@ -15,11 +15,11 @@ import numpy as np
 
 
 
-from PySide6.QtCore import Qt, QRect, QAbstractItemModel, Signal, QXmlStreamWriter, QXmlStreamReader
+from PySide6.QtCore import Qt, QRect, QAbstractItemModel, Signal, QXmlStreamWriter, QXmlStreamReader, QItemSelectionModel
 from PySide6.QtCharts import QLineSeries, QChart, QChartView, QValueAxis
 from PySide6.QtGui import QStandardItem, QStandardItemModel, QPalette, QColor, QAction, QShortcut, QKeySequence, QIcon, QDoubleValidator, QValidator, QPen, QIntValidator
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QHBoxLayout, QVBoxLayout, QScrollArea, QSizePolicy, \
-    QWidget, QSplitter, QFileDialog, QTabWidget, QColorDialog, QTableView, QStyledItemDelegate, QStyle, QToolButton, QStatusBar, QLabel, QMessageBox, QFileSystemModel, QLineEdit, QTreeWidget, QTreeWidgetItem, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsItem
+    QWidget, QSplitter, QFileDialog, QTabWidget, QColorDialog, QTableView, QStyledItemDelegate, QStyle, QToolButton, QStatusBar, QLabel, QMessageBox, QFileSystemModel, QLineEdit, QTreeWidget, QTreeWidgetItem, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsItem, QListWidget, QListWidgetItem, QFrame, QDialog, QCheckBox, QDialogButtonBox
 from scipy.spatial.transform import Rotation
 from PySide6.QtGui import QUndoCommand, QUndoStack
 
@@ -438,6 +438,8 @@ class ParticleEffectVariable:
         self.x = 0
         self.y = 0
         self.z = 0
+
+CURRENT_PARTICLE_EFFECT_VERSION = 0x71
 
 class ParticleEffect:
     def __init__(self):
@@ -1538,6 +1540,7 @@ class ColorTable(QTableView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.mainWindow = parent
         self.initUI()
 
     def initUI(self):
@@ -1555,24 +1558,92 @@ class ColorTable(QTableView):
         paste_shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
         paste_shortcut.activated.connect(self.pasteFromClipboard)
 
+    def _getColorGraphsForEffect(self, effect):
+        """Build the flat color_graphs list for an effect (same order as ColorGradientModel)."""
+        graphs = []
+        if effect and hasattr(effect, 'particle_systems'):
+            for ps in effect.particle_systems:
+                if hasattr(ps, 'color_graphs'):
+                    graphs.extend(ps.color_graphs)
+        return graphs
+
+    def _applyColorToOtherFiles(self, applyFunc):
+        """Apply a color transform function to all other files' selected color cells.
+        applyFunc(currentRgbTuple) -> newRgbTuple or None to skip.
+        """
+        if not self.mainWindow:
+            return
+        self.mainWindow.saveCurrentSelectionState()
+        loadedFiles = self.mainWindow.loadedFilesStrip.getAllLoadedFiles()
+        currentPath = self.mainWindow.currentFilePath
+
+        for filepath, fileData, effect, note in loadedFiles:
+            if filepath == currentPath:
+                continue
+            if filepath not in self.mainWindow.fileSelectionStates:
+                continue
+            selection = self.mainWindow.fileSelectionStates[filepath]['selection']
+            if not selection:
+                continue
+
+            colorGraphs = self._getColorGraphsForEffect(effect)
+            for row, col in selection:
+                if col % 2 != 1:  # Skip non-color columns (time columns)
+                    continue
+                if row >= len(colorGraphs):
+                    continue
+                graph = colorGraphs[row]
+                colorIdx = col // 2
+                if colorIdx >= len(graph.y):
+                    continue
+                try:
+                    oldRgb = tuple(int(c) for c in graph.y[colorIdx])
+                    newRgb = applyFunc(oldRgb)
+                    if newRgb is not None:
+                        # Validate and clamp RGB values to [0, 255]
+                        validated = []
+                        for val in newRgb:
+                            if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                                print(f"Invalid color value detected: {val}, skipping")
+                                validated = None
+                                break
+                            validated.append(max(0.0, min(255.0, float(val))))
+                        
+                        if validated is not None:
+                            graph.y[colorIdx] = validated
+                except Exception as e:
+                    print(f"Error applying color at row {row}, col {col}: {e}")
+                    pass
+
     def showColorPicker(self, pos):
         assert(len(self.selectedIndexes()) == 1)
         index = self.selectedIndexes()[0]
         colorTuple = ast.literal_eval(self.model().itemFromIndex(index).text())
         color = QColor(*colorTuple)
         selectedColor = QColorDialog.getColor(initial=color, parent=self, title="Select New Color")
+        if not selectedColor.isValid():
+            return
         try:
             colorTuple = selectedColor.toTuple()[0:3]
             self.model().setData(index, str(colorTuple))
         except:
             pass
+
+        # Apply same color to other files' selected cells
+        newH, newS, newV = selectedColor.hue(), selectedColor.saturation(), selectedColor.value()
+        def applyExactColor(oldRgb):
+            c = QColor(*oldRgb)
+            c.setHsv(newH, newS, newV)
+            return c.toRgb().toTuple()[0:3]
+        self._applyColorToOtherFiles(applyExactColor)
             
     def showMultiColorPicker(self, pos):
         index = [i for i in self.selectedIndexes() if i.column() % 2 == 1][0]
         colorTuple = ast.literal_eval(self.model().itemFromIndex(index).text())
         color = QColor(*colorTuple)
         selectedColor = QColorDialog.getColor(initial=color, parent=self, title="Select New Color")
-        hue = selectedColor.hue()
+        if not selectedColor.isValid():
+            return
         colors = [(QColor(*ast.literal_eval(self.model().itemFromIndex(i).text())), i) for i in self.selectedIndexes() if i.column() % 2 == 1]
         for color, index in colors:
             try:
@@ -1581,13 +1652,29 @@ class ColorTable(QTableView):
                 self.model().setData(index, str(colorTuple))
             except:
                 pass
+
+        # Apply same color to other files' selected cells
+        newH, newS, newV = selectedColor.hue(), selectedColor.saturation(), selectedColor.value()
+        def applyColor(oldRgb):
+            c = QColor(*oldRgb)
+            c.setHsv(newH, newS, newV)
+            return c.toRgb().toTuple()[0:3]
+        self._applyColorToOtherFiles(applyColor)
             
     def showHuePicker(self, pos):
+        # Save current file state
+        if self.mainWindow:
+            self.mainWindow.saveCurrentSelectionState()
+        
         index = [i for i in self.selectedIndexes() if i.column() % 2 == 1][0]
         colorTuple = ast.literal_eval(self.model().itemFromIndex(index).text())
         color = QColor(*colorTuple)
         selectedColor = QColorDialog.getColor(initial=color, parent=self, title="Adjust color hue")
+        if not selectedColor.isValid():
+            return
         hue = selectedColor.hue()
+        
+        # Apply hue change to current file
         colors = [(QColor(*ast.literal_eval(self.model().itemFromIndex(i).text())), i) for i in self.selectedIndexes() if i.column() % 2 == 1]
         for color, index in colors:
             try:
@@ -1596,6 +1683,13 @@ class ColorTable(QTableView):
                 self.model().setData(index, str(colorTuple))
             except:
                 pass
+        
+        # Apply hue change to ALL other files with selections
+        def applyHue(oldRgb):
+            c = QColor(*oldRgb)
+            c.setHsv(hue, c.saturation(), c.value())
+            return c.toRgb().toTuple()[0:3]
+        self._applyColorToOtherFiles(applyHue)
 
     def triggerColorPickerFromButton(self):
         if not self.selectedIndexes():
@@ -1786,80 +1880,640 @@ class LoadedFileWidget(QWidget):
     def load(self):
         self.openClicked.emit(self.filepath, self.fileData, self.particleEffect)
 
+class ParticleFileListItem(QWidget):
+    """Custom widget for each file in the list with color preview"""
+    
+    clearSelectionClicked = Signal(str)  # Signal when X button clicked
+    
+    def __init__(self, filepath, particleEffect, parent=None):
+        super().__init__(parent)
+        self.filepath = filepath
+        self.particleEffect = particleEffect
+        
+        # Main horizontal layout
+        layout = QHBoxLayout()
+        layout.setContentsMargins(5, 3, 5, 3)
+        layout.setSpacing(8)
+        
+        # Selection indicator (tick mark)
+        self.tickLabel = QLabel("✓")
+        self.tickLabel.setStyleSheet("color: #4CAF50; font-weight: bold; font-size: 14px;")
+        self.tickLabel.setVisible(False)
+        layout.addWidget(self.tickLabel)
+        
+        # File name label
+        self.nameLabel = QLabel(os.path.basename(filepath))
+        self.nameLabel.setMinimumWidth(180)
+        layout.addWidget(self.nameLabel)
+        
+        # Clear selection button (X)
+        self.clearBtn = QToolButton()
+        self.clearBtn.setText("✕")
+        self.clearBtn.setStyleSheet("color: #f44336; font-weight: bold;")
+        self.clearBtn.setFixedSize(20, 20)
+        self.clearBtn.setToolTip("Clear all selections in this file")
+        self.clearBtn.clicked.connect(lambda: self.clearSelectionClicked.emit(self.filepath))
+        self.clearBtn.setVisible(False)
+        layout.addWidget(self.clearBtn)
+        
+        # Spacer
+        layout.addStretch()
+        
+        # Color preview container
+        colorContainer = QWidget()
+        colorLayout = QHBoxLayout()
+        colorLayout.setContentsMargins(0, 0, 0, 0)
+        colorLayout.setSpacing(3)
+        
+        # Extract unique colors from particle effect
+        uniqueColors = self.extractUniqueColors()
+        
+        # Create color squares (limit to 20 to avoid overcrowding)
+        for color in uniqueColors[:20]:
+            colorSquare = QFrame()
+            colorSquare.setFixedSize(20, 20)
+            # Ensure values are in 0-1 range then convert to 0-255
+            r, g, b = [int(max(0, min(1, c)) * 255) for c in color]
+            colorSquare.setStyleSheet(f"background-color: rgb({r}, {g}, {b}); border: 1px solid #666;")
+            colorSquare.setToolTip(f"RGB: ({r}, {g}, {b})")
+            colorLayout.addWidget(colorSquare)
+        
+        if len(uniqueColors) > 20:
+            moreLabel = QLabel(f"+{len(uniqueColors) - 20}")
+            moreLabel.setStyleSheet("color: #888; font-size: 10px;")
+            colorLayout.addWidget(moreLabel)
+        
+        colorContainer.setLayout(colorLayout)
+        layout.addWidget(colorContainer)
+        
+        self.setLayout(layout)
+    
+    def extractUniqueColors(self):
+        """Extract unique colors from particle effect"""
+        colors = []
+        all_colors = []  # Keep track of all colors including dark ones
+        
+        if not self.particleEffect or not hasattr(self.particleEffect, 'particle_systems'):
+            return colors
+        
+        # Collect all colors from all particle systems
+        for system in self.particleEffect.particle_systems:
+            if hasattr(system, 'color_graphs'):
+                for colorGraph in system.color_graphs:
+                    if hasattr(colorGraph, 'y'):
+                        for color in colorGraph.y:
+                            # Normalize color values - check if already in 0-255 range or 0-1 range
+                            normalized_color = []
+                            for c in color:
+                                # If value > 1, assume it's in 0-255 range, convert to 0-1
+                                if c > 1.0:
+                                    normalized_color.append(c / 255.0)
+                                else:
+                                    # Already in 0-1 range, clamp to prevent overflow
+                                    normalized_color.append(max(0.0, min(1.0, c)))
+                            
+                            # Convert to tuple for comparison
+                            colorTuple = tuple(round(c, 3) for c in normalized_color)
+                            
+                            # Check if color already exists in all_colors list
+                            exists = False
+                            for existing in all_colors:
+                                if tuple(round(c, 3) for c in existing) == colorTuple:
+                                    exists = True
+                                    break
+                            
+                            if not exists:
+                                all_colors.append(normalized_color)
+                                # Skip very dark colors for the main list
+                                if sum(normalized_color) > 0.05:  # Changed from all() check to sum check
+                                    colors.append(normalized_color)
+        
+        # If no colors found after filtering, return all colors (including dark ones)
+        # This ensures we always show something
+        if len(colors) == 0 and len(all_colors) > 0:
+            return all_colors
+        
+        return colors
+    
+    def setEdited(self, value: bool):
+        """Mark the file as edited"""
+        basename = os.path.basename(self.filepath)
+        self.nameLabel.setText(f"{basename}{'*' if value else ''}")
+    
+    def setHasSelection(self, hasSelection: bool):
+        """Show/hide selection indicators"""
+        self.tickLabel.setVisible(hasSelection)
+        self.clearBtn.setVisible(hasSelection)
 
 class LoadedFilesBar(QWidget):
     
     loadFile = Signal(str, MemoryStream, ParticleEffect)
     
+    GROUP_ROLE = Qt.ItemDataRole.UserRole + 1      # True if group item
+    FILEPATH_ROLE = Qt.ItemDataRole.UserRole + 2   # filepath string for file items
+    COLOR_ROLE = Qt.ItemDataRole.UserRole + 3      # group color string
+    DATA_INDEX_ROLE = Qt.ItemDataRole.UserRole + 4 # index into fileData list
+    
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.mainWindow = parent
         self.layout = QVBoxLayout()
+        self.layout.setContentsMargins(0, 0, 0, 0)
         
-        self.tabWidget = QTabWidget(self)
-        self.tabWidget.setTabsClosable(True)
-        self.tabWidget.tabCloseRequested.connect(self.tabClosed)
-        self.tabWidget.currentChanged.connect(self.tabChanged)
-        #self.tabWidget.tabBar().setMovable(True)
+        # Search box
+        self.searchBox = QLineEdit()
+        self.searchBox.setPlaceholderText("Search by filename or ID...")
+        self.searchBox.textChanged.connect(self.filterFiles)
         
+        # Tree widget for files (supports grouping)
+        self.treeWidget = QTreeWidget(self)
+        self.treeWidget.setHeaderHidden(True)
+        self.treeWidget.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.treeWidget.setDragDropMode(QTreeWidget.InternalMove)
+        self.treeWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.treeWidget.customContextMenuRequested.connect(self.showContextMenu)
+        self.treeWidget.currentItemChanged.connect(self.onCurrentItemChanged)
+        
+        # Note entry
         self.noteEntry = QLineEdit()
+        self.noteEntry.setPlaceholderText("Set Note:")
         self.noteEntry.textEdited.connect(self.setNote)
         
-        self.layout.addWidget(self.tabWidget)
+        self.layout.addWidget(self.searchBox)
+        self.layout.addWidget(self.treeWidget)
         self.layout.addWidget(self.noteEntry)
         
-        self.tabData = []
+        self.fileData = []  # Store [filepath, fileData, effect, note]
+        self._groupCounter = 0
         
         self.setLayout(self.layout)
-        
-    def tabClosed(self, tabIndex):
-        del self.tabData[tabIndex]
-        self.tabWidget.removeTab(tabIndex)
-        
-    def closeCurrentTab(self):
-        if self.tabWidget.currentIndex() != -1:
-            self.tabClosed(self.tabWidget.currentIndex())
-        
-    def tabChanged(self, tabIndex):
-        if tabIndex == -1:
+    
+    def _getFileDataIndex(self, filepath):
+        """Get index in fileData by filepath"""
+        for i, data in enumerate(self.fileData):
+            if data[0] == filepath:
+                return i
+        return -1
+    
+    def onCurrentItemChanged(self, current, previous):
+        """Handle tree item selection change"""
+        if not current:
             return
-        tabData = self.tabData[tabIndex]
-        if tabData[3]:
-            self.noteEntry.setText(tabData[3])
+        
+        isGroup = current.data(0, self.GROUP_ROLE)
+        if isGroup:
+            return
+        
+        filepath = current.data(0, self.FILEPATH_ROLE)
+        if not filepath:
+            return
+        
+        idx = self._getFileDataIndex(filepath)
+        if idx == -1:
+            return
+        
+        data = self.fileData[idx]
+        if data[3]:
+            self.noteEntry.setText(data[3])
         else:
-            self.noteEntry.setText("Set Note:")
-        self.loadFile.emit(tabData[0], tabData[1], tabData[2])
+            self.noteEntry.setText("")
+        self.loadFile.emit(data[0], data[1], data[2])
         
     def addFile(self, filepath, fileData, effect, note=""):
-        self.tabData.append([filepath, fileData, effect, note])
-        index = self.tabWidget.addTab(QWidget(), f"{os.path.basename(filepath)}")
-        self.tabWidget.setCurrentIndex(index)
+        self.fileData.append([filepath, fileData, effect, note])
         
+        # Create tree item
+        item = QTreeWidgetItem()
+        item.setData(0, self.GROUP_ROLE, False)
+        item.setData(0, self.FILEPATH_ROLE, filepath)
+        
+        # Create custom widget
+        itemWidget = ParticleFileListItem(filepath, effect)
+        itemWidget.clearSelectionClicked.connect(self.clearFileSelection)
+        
+        self.treeWidget.addTopLevelItem(item)
+        self.treeWidget.setItemWidget(item, 0, itemWidget)
+        item.setSizeHint(0, itemWidget.sizeHint())
+        
+        self.treeWidget.setCurrentItem(item)
+        
+    def closeCurrentTab(self):
+        current = self.treeWidget.currentItem()
+        if not current:
+            return
+        isGroup = current.data(0, self.GROUP_ROLE)
+        if isGroup:
+            return
+        filepath = current.data(0, self.FILEPATH_ROLE)
+        if filepath is None:
+            return
+        idx = self._getFileDataIndex(filepath)
+        if idx >= 0:
+            del self.fileData[idx]
+        # Remove from tree
+        parent = current.parent()
+        if parent:
+            parent.removeChild(current)
+        else:
+            index = self.treeWidget.indexOfTopLevelItem(current)
+            if index >= 0:
+                self.treeWidget.takeTopLevelItem(index)
+            
     def getAllLoadedFiles(self):
-        return self.tabData
+        return self.fileData
         
     def getSelectedFile(self):
-        if self.tabWidget.currentIndex() != -1:
-            return self.tabData[self.tabWidget.currentIndex()]
+        current = self.treeWidget.currentItem()
+        if current and not current.data(0, self.GROUP_ROLE):
+            filepath = current.data(0, self.FILEPATH_ROLE)
+            idx = self._getFileDataIndex(filepath)
+            if idx >= 0:
+                return self.fileData[idx]
         return None
         
     def setCurrentFilePath(self, newPath):
-        if self.tabWidget.currentIndex() != -1:
-            self.tabData[self.tabWidget.currentIndex()][0] = newPath
-            self.tabWidget.setTabText(self.tabWidget.currentIndex(), f"{os.path.basename(newPath)}")
+        current = self.treeWidget.currentItem()
+        if current and not current.data(0, self.GROUP_ROLE):
+            oldPath = current.data(0, self.FILEPATH_ROLE)
+            idx = self._getFileDataIndex(oldPath)
+            if idx >= 0:
+                self.fileData[idx][0] = newPath
+                current.setData(0, self.FILEPATH_ROLE, newPath)
+                widget = self.treeWidget.itemWidget(current, 0)
+                if widget:
+                    widget.filepath = newPath
+                    widget.nameLabel.setText(os.path.basename(newPath))
         
     def setNote(self, newNote):
-        if self.tabWidget.currentIndex() != -1:
-            self.tabData[self.tabWidget.currentIndex()][3] = newNote
+        current = self.treeWidget.currentItem()
+        if current and not current.data(0, self.GROUP_ROLE):
+            filepath = current.data(0, self.FILEPATH_ROLE)
+            idx = self._getFileDataIndex(filepath)
+            if idx >= 0:
+                self.fileData[idx][3] = newNote
             
     def markEdited(self, value: bool):
-        if self.tabWidget.currentIndex() != -1:
-            text = self.tabWidget.setTabText
-            filepath = self.tabData[self.tabWidget.currentIndex()][0]
-            self.tabWidget.setTabText(self.tabWidget.currentIndex(), f"{os.path.basename(filepath)}{'*' if value else ''}")
+        current = self.treeWidget.currentItem()
+        if current and not current.data(0, self.GROUP_ROLE):
+            widget = self.treeWidget.itemWidget(current, 0)
+            if widget:
+                widget.setEdited(value)
+    
+    def filterFiles(self, searchText):
+        """Filter files based on search text"""
+        searchLower = searchText.lower()
+        
+        def filterItem(item):
+            isGroup = item.data(0, self.GROUP_ROLE)
+            if isGroup:
+                # Show group if any child matches
+                anyVisible = False
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    childVisible = filterItem(child)
+                    if childVisible:
+                        anyVisible = True
+                item.setHidden(not anyVisible and bool(searchText))
+                # Expand groups with matches
+                if anyVisible:
+                    item.setExpanded(True)
+                return anyVisible
+            else:
+                widget = self.treeWidget.itemWidget(item, 0)
+                if widget:
+                    filename = os.path.basename(widget.filepath).lower()
+                    visible = searchLower in filename
+                    item.setHidden(not visible)
+                    return visible
+                return True
+        
+        for i in range(self.treeWidget.topLevelItemCount()):
+            filterItem(self.treeWidget.topLevelItem(i))
+    
+    def showContextMenu(self, pos):
+        """Show context menu for file tree"""
+        selectedItems = self.treeWidget.selectedItems()
+        
+        menu = QMenu(self)
+        
+        # Get file items only (non-group)
+        fileItems = [item for item in selectedItems if not item.data(0, self.GROUP_ROLE)]
+        groupItems = [item for item in selectedItems if item.data(0, self.GROUP_ROLE)]
+        
+        if len(fileItems) >= 2:
+            groupAction = QAction(f"Group {len(fileItems)} files", self)
+            groupAction.triggered.connect(lambda: self.groupSelectedItems(fileItems))
+            menu.addAction(groupAction)
+            menu.addSeparator()
+        
+        if len(groupItems) == 1:
+            group = groupItems[0]
+            renameAction = QAction("Rename Group", self)
+            renameAction.triggered.connect(lambda: self.renameGroup(group))
+            menu.addAction(renameAction)
+            
+            colorAction = QAction("Change Group Color", self)
+            colorAction.triggered.connect(lambda: self.changeGroupColor(group))
+            menu.addAction(colorAction)
+            
+            ungroupAction = QAction("Ungroup", self)
+            ungroupAction.triggered.connect(lambda: self.ungroupItems(group))
+            menu.addAction(ungroupAction)
+            menu.addSeparator()
+        
+        if len(fileItems) >= 1:
+            deleteAction = QAction(f"Delete ({len(fileItems)} file{'s' if len(fileItems) > 1 else ''})", self)
+            deleteAction.triggered.connect(lambda: self.deleteSelectedFiles(fileItems))
+            menu.addAction(deleteAction)
+        
+        if len(groupItems) == 1 and len(fileItems) == 0:
+            deleteGroupAction = QAction("Delete Group & Files", self)
+            deleteGroupAction.triggered.connect(lambda: self.deleteGroup(groupItems[0]))
+            menu.addAction(deleteGroupAction)
+        
+        if menu.actions():
+            menu.exec(self.treeWidget.mapToGlobal(pos))
+    
+    def groupSelectedItems(self, fileItems):
+        """Group selected file items into a folder"""
+        self._groupCounter += 1
+        groupName = f"Group {self._groupCounter}"
+        groupColor = "#4a90d9"
+        
+        # Create group item
+        groupItem = QTreeWidgetItem()
+        groupItem.setData(0, self.GROUP_ROLE, True)
+        groupItem.setData(0, self.COLOR_ROLE, groupColor)
+        groupItem.setText(0, f"📁 {groupName}")
+        groupItem.setForeground(0, QColor(groupColor))
+        groupItem.setFlags(groupItem.flags() | Qt.ItemFlag.ItemIsEditable)
+        
+        # Find insertion index (where the first selected item is)
+        firstItem = fileItems[0]
+        firstParent = firstItem.parent()
+        if firstParent:
+            insertIdx = firstParent.indexOfChild(firstItem)
+            firstParent.insertChild(insertIdx, groupItem)
+        else:
+            insertIdx = self.treeWidget.indexOfTopLevelItem(firstItem)
+            self.treeWidget.insertTopLevelItem(insertIdx, groupItem)
+        
+        # Move items into group
+        for item in fileItems:
+            # Save widget before removing
+            widget = self.treeWidget.itemWidget(item, 0)
+            filepath = item.data(0, self.FILEPATH_ROLE)
+            
+            # Remove from current parent
+            parent = item.parent()
+            if parent:
+                idx = parent.indexOfChild(item)
+                parent.takeChild(idx)
+            else:
+                idx = self.treeWidget.indexOfTopLevelItem(item)
+                self.treeWidget.takeTopLevelItem(idx)
+            
+            # Add to group
+            groupItem.addChild(item)
+            
+            # Re-create widget (widget is lost on reparent)
+            if filepath:
+                dataIdx = self._getFileDataIndex(filepath)
+                if dataIdx >= 0:
+                    effect = self.fileData[dataIdx][2]
+                    newWidget = ParticleFileListItem(filepath, effect)
+                    newWidget.clearSelectionClicked.connect(self.clearFileSelection)
+                    self.treeWidget.setItemWidget(item, 0, newWidget)
+                    item.setSizeHint(0, newWidget.sizeHint())
+        
+        groupItem.setExpanded(True)
+    
+    def ungroupItems(self, groupItem):
+        """Ungroup: move all children to top level"""
+        parentOfGroup = groupItem.parent()
+        if parentOfGroup:
+            insertIdx = parentOfGroup.indexOfChild(groupItem)
+        else:
+            insertIdx = self.treeWidget.indexOfTopLevelItem(groupItem)
+        
+        children = []
+        while groupItem.childCount() > 0:
+            child = groupItem.takeChild(0)
+            children.append(child)
+        
+        # Insert children at group's position
+        for i, child in enumerate(children):
+            filepath = child.data(0, self.FILEPATH_ROLE)
+            if parentOfGroup:
+                parentOfGroup.insertChild(insertIdx + i, child)
+            else:
+                self.treeWidget.insertTopLevelItem(insertIdx + i, child)
+            # Re-create widget
+            if filepath:
+                dataIdx = self._getFileDataIndex(filepath)
+                if dataIdx >= 0:
+                    effect = self.fileData[dataIdx][2]
+                    newWidget = ParticleFileListItem(filepath, effect)
+                    newWidget.clearSelectionClicked.connect(self.clearFileSelection)
+                    self.treeWidget.setItemWidget(child, 0, newWidget)
+                    child.setSizeHint(0, newWidget.sizeHint())
+        
+        # Remove empty group
+        if parentOfGroup:
+            parentOfGroup.removeChild(groupItem)
+        else:
+            idx = self.treeWidget.indexOfTopLevelItem(groupItem)
+            self.treeWidget.takeTopLevelItem(idx)
+    
+    def renameGroup(self, groupItem):
+        """Rename a group via dialog"""
+        from PySide6.QtWidgets import QInputDialog
+        currentName = groupItem.text(0).replace("📁 ", "")
+        newName, ok = QInputDialog.getText(self, "Rename Group", "Group name:", text=currentName)
+        if ok and newName:
+            color = groupItem.data(0, self.COLOR_ROLE) or "#4a90d9"
+            groupItem.setText(0, f"📁 {newName}")
+            groupItem.setForeground(0, QColor(color))
+    
+    def changeGroupColor(self, groupItem):
+        """Change group color via color dialog"""
+        currentColor = groupItem.data(0, self.COLOR_ROLE) or "#4a90d9"
+        color = QColorDialog.getColor(QColor(currentColor), self, "Select Group Color")
+        if color.isValid():
+            colorStr = color.name()
+            groupItem.setData(0, self.COLOR_ROLE, colorStr)
+            groupItem.setForeground(0, QColor(colorStr))
+            currentText = groupItem.text(0)
+            groupItem.setText(0, currentText)  # Refresh display
+    
+    def deleteSelectedFiles(self, fileItems):
+        """Delete selected file items"""
+        for item in fileItems:
+            filepath = item.data(0, self.FILEPATH_ROLE)
+            if filepath:
+                idx = self._getFileDataIndex(filepath)
+                if idx >= 0:
+                    del self.fileData[idx]
+                # Remove selection state
+                if self.mainWindow and filepath in self.mainWindow.fileSelectionStates:
+                    del self.mainWindow.fileSelectionStates[filepath]
+            # Remove from tree
+            parent = item.parent()
+            if parent:
+                parent.removeChild(item)
+            else:
+                idx = self.treeWidget.indexOfTopLevelItem(item)
+                if idx >= 0:
+                    self.treeWidget.takeTopLevelItem(idx)
+    
+    def deleteGroup(self, groupItem):
+        """Delete a group and all its file children"""
+        filesToDelete = []
+        for i in range(groupItem.childCount()):
+            child = groupItem.child(i)
+            if not child.data(0, self.GROUP_ROLE):
+                filesToDelete.append(child)
+        
+        for item in filesToDelete:
+            filepath = item.data(0, self.FILEPATH_ROLE)
+            if filepath:
+                idx = self._getFileDataIndex(filepath)
+                if idx >= 0:
+                    del self.fileData[idx]
+                if self.mainWindow and filepath in self.mainWindow.fileSelectionStates:
+                    del self.mainWindow.fileSelectionStates[filepath]
+        
+        parent = groupItem.parent()
+        if parent:
+            parent.removeChild(groupItem)
+        else:
+            idx = self.treeWidget.indexOfTopLevelItem(groupItem)
+            if idx >= 0:
+                self.treeWidget.takeTopLevelItem(idx)
+    
+    def updateFileIndicators(self):
+        """Update tick/X indicators for all files based on selection state"""
+        if not self.mainWindow:
+            return
+        
+        def updateItem(item):
+            isGroup = item.data(0, self.GROUP_ROLE)
+            if isGroup:
+                for i in range(item.childCount()):
+                    updateItem(item.child(i))
+            else:
+                widget = self.treeWidget.itemWidget(item, 0)
+                if widget and isinstance(widget, ParticleFileListItem):
+                    filepath = widget.filepath
+                    hasSelection = False
+                    if filepath in self.mainWindow.fileSelectionStates:
+                        selection = self.mainWindow.fileSelectionStates[filepath]['selection']
+                        hasSelection = len(selection) > 0
+                    widget.setHasSelection(hasSelection)
+        
+        for i in range(self.treeWidget.topLevelItemCount()):
+            updateItem(self.treeWidget.topLevelItem(i))
+    
+    def clearFileSelection(self, filepath):
+        """Clear all selections for a specific file"""
+        if not self.mainWindow:
+            return
+        
+        if filepath in self.mainWindow.fileSelectionStates:
+            self.mainWindow.fileSelectionStates[filepath]['selection'] = []
+        
+        if self.mainWindow.currentFilePath == filepath:
+            self.mainWindow.colorView.clearSelection()
+        
+        self.updateFileIndicators()
+    
+    def getGroupStructure(self):
+        """Get the tree structure for saving to project file.
+        Returns list of: {'type': 'file', 'filepath': ..., 'note': ...}
+                     or: {'type': 'group', 'name': ..., 'color': ..., 'children': [...]}
+        """
+        def itemToDict(item):
+            isGroup = item.data(0, self.GROUP_ROLE)
+            if isGroup:
+                children = []
+                for i in range(item.childCount()):
+                    children.append(itemToDict(item.child(i)))
+                return {
+                    'type': 'group',
+                    'name': item.text(0).replace("📁 ", ""),
+                    'color': item.data(0, self.COLOR_ROLE) or "#4a90d9",
+                    'children': children
+                }
+            else:
+                filepath = item.data(0, self.FILEPATH_ROLE)
+                idx = self._getFileDataIndex(filepath)
+                note = self.fileData[idx][3] if idx >= 0 else ""
+                return {
+                    'type': 'file',
+                    'filepath': filepath,
+                    'note': note or ""
+                }
+        
+        result = []
+        for i in range(self.treeWidget.topLevelItemCount()):
+            result.append(itemToDict(self.treeWidget.topLevelItem(i)))
+        return result
+    
+    def loadGroupStructure(self, structure):
+        """Rebuild tree from saved structure"""
+        def buildItem(data, parentItem=None):
+            if data['type'] == 'group':
+                groupItem = QTreeWidgetItem()
+                groupItem.setData(0, self.GROUP_ROLE, True)
+                groupItem.setData(0, self.COLOR_ROLE, data.get('color', '#4a90d9'))
+                groupItem.setText(0, f"📁 {data['name']}")
+                groupItem.setForeground(0, QColor(data.get('color', '#4a90d9')))
+                
+                if parentItem:
+                    parentItem.addChild(groupItem)
+                else:
+                    self.treeWidget.addTopLevelItem(groupItem)
+                
+                for child in data.get('children', []):
+                    buildItem(child, groupItem)
+                
+                groupItem.setExpanded(True)
+                self._groupCounter += 1
+            elif data['type'] == 'file':
+                filepath = data['filepath']
+                if not os.path.exists(filepath):
+                    return
+                note = data.get('note', '')
+                try:
+                    with open(filepath, 'rb') as f:
+                        fileData = MemoryStream(f.read())
+                    effect = ParticleEffect()
+                    effect.from_memory_stream(fileData)
+                    self.fileData.append([filepath, fileData, effect, note])
+                    
+                    item = QTreeWidgetItem()
+                    item.setData(0, self.GROUP_ROLE, False)
+                    item.setData(0, self.FILEPATH_ROLE, filepath)
+                    
+                    itemWidget = ParticleFileListItem(filepath, effect)
+                    itemWidget.clearSelectionClicked.connect(self.clearFileSelection)
+                    
+                    if parentItem:
+                        parentItem.addChild(item)
+                    else:
+                        self.treeWidget.addTopLevelItem(item)
+                    
+                    self.treeWidget.setItemWidget(item, 0, itemWidget)
+                    item.setSizeHint(0, itemWidget.sizeHint())
+                except Exception:
+                    pass
+        
+        for data in structure:
+            buildItem(data)
         
     def clear(self):
-        self.tabWidget.clear()
-        self.tabData.clear()
+        self.treeWidget.clear()
+        self.fileData.clear()
 
 class MainWindow(QMainWindow):
 
@@ -1876,6 +2530,10 @@ class MainWindow(QMainWindow):
             'opacity': set(),
             'size': set()
         }
+        # Per-file selection state: {filepath: {'presets': [None]*2, 'selection': [(row,col)]}}
+        self.fileSelectionStates = {}
+        self.currentFilePath = None
+        self._isLoadingFile = False  # Flag to prevent saving selection during file load
         self.setStatusBar(QStatusBar(self))
         self.initComponents()
         self.filenameLabel = QLabel("No file loaded")
@@ -1956,6 +2614,29 @@ class MainWindow(QMainWindow):
         buttonLayout.addWidget(self.hideTimeColumnsBtn)
         self.hideTimeColumnsBtn.setToolTip("Toggle visibility of time columns")
         buttonLayout.addWidget(self.pickColorBtn)
+        
+        # Add separator
+        buttonLayout.addSpacing(20)
+        
+        # Add preset buttons (Save P1-P2)
+        for i in range(2):
+            saveBtn = QToolButton(self.colorTab)
+            saveBtn.setText(f"Save P{i+1}")
+            saveBtn.setToolTip(f"Save current selection to Preset {i+1}")
+            saveBtn.clicked.connect(lambda checked=False, idx=i: self.saveColorSelectionPreset(idx))
+            buttonLayout.addWidget(saveBtn)
+        
+        buttonLayout.addSpacing(10)
+        
+        # Add preset buttons (Load P1-P2)
+        for i in range(2):
+            loadBtn = QToolButton(self.colorTab)
+            loadBtn.setText(f"Load P{i+1}")
+            loadBtn.setToolTip(f"Load selection from Preset {i+1}")
+            loadBtn.clicked.connect(lambda checked=False, idx=i: self.loadColorSelectionPreset(idx))
+            buttonLayout.addWidget(loadBtn)
+        
+        buttonLayout.addStretch()
         layout.addLayout(buttonLayout)
         layout.addWidget(self.colorView)
         self.colorTab.setLayout(layout)
@@ -2025,16 +2706,29 @@ class MainWindow(QMainWindow):
 
         delegate = ColorSwatchDelegate()
         self.colorView.setItemDelegate(delegate)
+        
+        # Track selection changes to update indicators
+        self.colorView.selectionModel().selectionChanged.connect(self.onColorSelectionChanged)
 
         self.pickColorBtn = QToolButton(self.colorTab)
         self.pickColorBtn.setText("Color Picker")
         self.pickColorBtn.setToolTip("Open Color Picker for selected color cell")
         self.pickColorBtn.clicked.connect(self.colorView.triggerColorPickerFromButton)
 
-
         self.hideTimeColumnsBtn = QToolButton(self.colorTab)
         self.hideTimeColumnsBtn.setText("Toggle Time Columns")
         self.hideTimeColumnsBtn.clicked.connect(self.toggleTimeColumns)
+    
+    def onColorSelectionChanged(self):
+        """Called when color cell selection changes"""
+        # Don't save during file loading/restoring
+        if self._isLoadingFile:
+            return
+        # Save current selection state
+        self.saveCurrentSelectionState()
+        # Update file indicators to show which files have selections
+        if hasattr(self, 'loadedFilesStrip'):
+            self.loadedFilesStrip.updateFileIndicators()
 
     def toggleTimeColumns(self):
         for col in range(self.colorViewModel.columnCount()):
@@ -2066,6 +2760,65 @@ class MainWindow(QMainWindow):
                     self.hidden_columns['opacity'].add(col)
                 else:
                     self.hidden_columns['opacity'].discard(col)
+    
+    def saveColorSelectionPreset(self, presetIndex):
+        """Save current color cell selection to preset slot (0-3)"""
+        if not self.currentFilePath:
+            return
+        selectedIndexes = self.colorView.selectedIndexes()
+        if not selectedIndexes:
+            return
+        # Store as list of (row, col) tuples
+        preset = [(idx.row(), idx.column()) for idx in selectedIndexes]
+        if self.currentFilePath not in self.fileSelectionStates:
+            self.fileSelectionStates[self.currentFilePath] = {'presets': [None]*2, 'selection': []}
+        self.fileSelectionStates[self.currentFilePath]['presets'][presetIndex] = preset
+    
+    def loadColorSelectionPreset(self, presetIndex):
+        """Load color cell selection from preset slot (0-3)"""
+        if not self.currentFilePath or self.currentFilePath not in self.fileSelectionStates:
+            return
+        preset = self.fileSelectionStates[self.currentFilePath]['presets'][presetIndex]
+        if preset is None:
+            return
+        
+        # Clear current selection
+        self.colorView.clearSelection()
+        
+        # Select cells from preset
+        selectionModel = self.colorView.selectionModel()
+        for row, col in preset:
+            index = self.colorViewModel.index(row, col)
+            if index.isValid():
+                selectionModel.select(index, QItemSelectionModel.Select)
+    
+    def saveCurrentSelectionState(self):
+        """Save current color cell selection state before switching files"""
+        if not self.currentFilePath:
+            return
+        selectedIndexes = self.colorView.selectedIndexes()
+        selection = [(idx.row(), idx.column()) for idx in selectedIndexes]
+        
+        if self.currentFilePath not in self.fileSelectionStates:
+            self.fileSelectionStates[self.currentFilePath] = {'presets': [None]*2, 'selection': []}
+        self.fileSelectionStates[self.currentFilePath]['selection'] = selection
+    
+    def restoreSelectionState(self):
+        """Restore color cell selection state for current file"""
+        if not self.currentFilePath:
+            return
+        
+        # Clear current selection
+        self.colorView.clearSelection()
+        
+        # Restore if exists
+        if self.currentFilePath in self.fileSelectionStates:
+            selection = self.fileSelectionStates[self.currentFilePath]['selection']
+            selectionModel = self.colorView.selectionModel()
+            for row, col in selection:
+                index = self.colorViewModel.index(row, col)
+                if index.isValid():
+                    selectionModel.select(index, QItemSelectionModel.Select)
 
     def initSizeView(self):
         self.sizeView = QTableView(self)
@@ -2136,10 +2889,12 @@ class MainWindow(QMainWindow):
 
         self.file_menu.addAction(self.fileOpenArchiveAction)
         self.file_menu.addAction(self.fileLoadProjectAction)
+        self.file_menu.addSeparator()
         self.file_menu.addAction(self.fileSaveArchiveAction)
         self.file_menu.addAction(self.fileSaveAsAction)
         self.file_menu.addAction(self.fileSaveAllFilesAction)
         self.file_menu.addAction(self.fileSaveProjectAction)
+        self.file_menu.addSeparator()
         self.file_menu.addAction(self.fileCloseAction)
         self.file_menu.addAction(self.fileCloseAllAction)
 
@@ -2152,10 +2907,27 @@ class MainWindow(QMainWindow):
         self.edit_menu.addAction(self.redo_action)
         
     def loadFromStream(self, filepath: str, stream: MemoryStream, particleEffect: ParticleEffect):
+        # Save current selection state before switching
+        if not self._isLoadingFile:
+            self.saveCurrentSelectionState()
+        
+        # Set flag to prevent selection changes during load
+        self._isLoadingFile = True
+        
         self.particleEffectData = stream
         self.particleEffect = particleEffect
+        self.currentFilePath = filepath
         self.reloadData()
         self.setLoadedFileLabels(filepath)
+        
+        # Restore selection state for new file
+        self.restoreSelectionState()
+        
+        # Clear flag
+        self._isLoadingFile = False
+        
+        # Update file list indicators
+        self.loadedFilesStrip.updateFileIndicators()
         
     def setLoadedFileLabels(self, filepath):
         self.statusBar().showMessage(f"Loaded: {os.path.basename(filepath)}", 5000)
@@ -2176,21 +2948,41 @@ class MainWindow(QMainWindow):
         self.applyHiddenColumns('size', self.sizeView)
                 
     def saveProject(self, initialdir: str | None = '', outputFile: str | None = ""):
+        import json
         if not outputFile:
             outputFile = QFileDialog.getSaveFileName(self, "Save File", str(initialdir), "Particle Mod (*.pmod)")
             outputFile = outputFile[0]
         if not outputFile:
             return
-        loadedFiles = self.loadedFilesStrip.getAllLoadedFiles()
-        root = ET.Element("root")
-        project = ET.SubElement(root, "project", name="default project")
-        projectFiles = ET.SubElement(project, "project_files")
-        for item in loadedFiles:
-            file = ET.SubElement(projectFiles, "file")
-            ET.SubElement(file, "filepath").text = item[0]
-            ET.SubElement(file, "note").text = item[3]
-        tree = ET.ElementTree(root)
-        tree.write(outputFile)
+        
+        # Save current file's selection before serializing
+        self.saveCurrentSelectionState()
+        
+        # Get tree structure with groups
+        structure = self.loadedFilesStrip.getGroupStructure()
+        
+        # Serialize selection states
+        selectionStates = {}
+        for fp, state in self.fileSelectionStates.items():
+            selectionStates[fp] = {
+                'selection': state.get('selection', []),
+                'presets': [
+                    preset if preset is not None else None
+                    for preset in state.get('presets', [None, None])
+                ]
+            }
+        
+        projectData = {
+            'version': 2,
+            'project_name': 'default project',
+            'structure': structure,
+            'selectionStates': selectionStates
+        }
+        
+        with open(outputFile, 'w', encoding='utf-8') as f:
+            json.dump(projectData, f, indent=2, ensure_ascii=False)
+        
+        self.statusBar().showMessage(f"Project saved to {os.path.basename(outputFile)}", 3000)
         
     def saveProjectFiles(self):
         projectFiles = self.loadedFilesStrip.getAllLoadedFiles()
@@ -2203,63 +2995,106 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved all particle files", 3000)
         
     def loadProject(self, initialdir: str | None = '', projectFile: str | None = ""):
+        import json
         if not projectFile:
             projectFile = QFileDialog.getOpenFileName(self, "Select Project File", str(initialdir), "Particle Mod (*.pmod)")
             projectFile = projectFile[0]
         if not projectFile:
             return
         self.closeAllFiles()
-        tree = ET.parse(projectFile)
-        root = tree.getroot()
-        for project in root:
-            projectFiles = project.find('project_files')
-            for file in projectFiles:
-                filepath = file.find('filepath').text
-                if not os.path.exists(filepath):
-                    continue
-                note = file.find('note').text
-                with open(filepath, 'rb') as f:
-                    fileData = MemoryStream(f.read())
-                particleEffect = ParticleEffect()
-                particleEffect.from_memory_stream(fileData)
-                self.addLoadedFile(filepath, fileData, particleEffect, note)
-            break # support for multiple projects may be added later
+        
+        # Try JSON format (v2) first, then fall back to XML (v1)
+        try:
+            with open(projectFile, 'r', encoding='utf-8') as f:
+                projectData = json.load(f)
+            
+            structure = projectData.get('structure', [])
+            self.loadedFilesStrip.loadGroupStructure(structure)
+            
+            # Restore selection states
+            savedStates = projectData.get('selectionStates', {})
+            for fp, state in savedStates.items():
+                self.fileSelectionStates[fp] = {
+                    'selection': [tuple(s) for s in state.get('selection', [])],
+                    'presets': [
+                        [tuple(s) for s in preset] if preset is not None else None
+                        for preset in state.get('presets', [None, None])
+                    ]
+                }
+            
+            # Update indicators and restore current file selection
+            self.loadedFilesStrip.updateFileIndicators()
+            if self.currentFilePath:
+                self.restoreSelectionState()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Fall back to old XML format
+            tree = ET.parse(projectFile)
+            root = tree.getroot()
+            for project in root:
+                projectFiles = project.find('project_files')
+                for file in projectFiles:
+                    filepath = file.find('filepath').text
+                    if not os.path.exists(filepath):
+                        continue
+                    note = file.find('note').text
+                    with open(filepath, 'rb') as f:
+                        fileData = MemoryStream(f.read())
+                    particleEffect = ParticleEffect()
+                    particleEffect.from_memory_stream(fileData)
+                    self.addLoadedFile(filepath, fileData, particleEffect, note)
+                break
             
     def closeAllFiles(self):
         self.loadedFilesStrip.clear()
         
     def closeCurrentFile(self):
         self.loadedFilesStrip.closeCurrentTab()
-        
+    
     def addLoadedFile(self, filepath: str, fileData: MemoryStream, particleEffect: ParticleEffect, note: str=""):
         self.loadedFilesStrip.addFile(filepath, fileData, particleEffect, note)
         #self.loadedFilesWindow.addFile(filepath, fileData, particleEffect, note)
 
     def load_archive(self, initialdir: str | None = '', archive_file: str | None = ""):
+        archive_files = []
         if not archive_file:
-            archive_file = QFileDialog.getOpenFileName(self, "Select archive", str(initialdir), "Particle Files (*.particles *.pmod);;All Files (*.*)")
-            archive_file = archive_file[0]
-        if not archive_file:
+            # Use getOpenFileNames (plural) to allow multiple file selection
+            archive_files_result = QFileDialog.getOpenFileNames(self, "Select archive(s)", str(initialdir), "Particle Files (*.particles *.pmod);;All Files (*.*)")
+            archive_files = archive_files_result[0]
+        else:
+            # Single file provided programmatically
+            archive_files = [archive_file]
+            
+        if not archive_files:
             return
-        if os.path.splitext(archive_file)[1] == ".pmod":
-            self.loadProject(projectFile = archive_file)
-            return
-        self.name = archive_file
-        with open(archive_file, "rb") as f:
-            self.particleEffectData = MemoryStream(f.read())
-        self.particleEffect = ParticleEffect()
-        self.particleEffect.from_memory_stream(self.particleEffectData)
-        self.reloadData()
-        self.addLoadedFile(archive_file, self.particleEffectData, self.particleEffect)
-        self.setLoadedFileLabels(archive_file)
+        
+        # Process each selected file
+        for idx, current_file in enumerate(archive_files):
+            if os.path.splitext(current_file)[1] == ".pmod":
+                self.loadProject(projectFile = current_file)
+                continue
+                
+            self.name = current_file
+            with open(current_file, "rb") as f:
+                particleEffectData = MemoryStream(f.read())
+            particleEffect = ParticleEffect()
+            particleEffect.from_memory_stream(particleEffectData)
+            
+            # Only set as current effect for the first file or last file
+            if idx == len(archive_files) - 1:
+                self.particleEffectData = particleEffectData
+                self.particleEffect = particleEffect
+                self.reloadData()
+                self.setLoadedFileLabels(current_file)
+                
+                # Reapply hidden column states for the last file
+                self.applyHiddenColumns('color', self.colorView)
+                self.applyHiddenColumns('opacity', self.opacityView)
+                self.applyHiddenColumns('size', self.sizeView)
+            
+            self.addLoadedFile(current_file, particleEffectData, particleEffect)
             
         #self.positionViewModel.setFileData(self.data)
         #self.rotationViewModel.setFileData(self.data)
-
-        # Reapply hidden column states
-        self.applyHiddenColumns('color', self.colorView)
-        self.applyHiddenColumns('opacity', self.opacityView)
-        self.applyHiddenColumns('size', self.sizeView)
         
         
         
