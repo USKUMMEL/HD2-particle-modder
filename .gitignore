@@ -1,10 +1,5 @@
-# Backup directory
+# Backup files
 .backup/
-
-# Build artifacts
-build/
-dist/
-*.spec
 
 # Python cache
 __pycache__/
@@ -12,16 +7,15 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Virtual environment
-venv/
-env/
+# Build directories
+build/
+dist/
+*.spec
 
-# IDE files
+# IDE
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
