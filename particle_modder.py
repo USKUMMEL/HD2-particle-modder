@@ -1,3 +1,13 @@
+# ==============================================================================
+# HD2 Particle Modder - Version 2.0.4
+# A tool for modifying Helldivers 2 particle effect files
+# ==============================================================================
+
+# ==============================================================================
+# IMPORTS
+# ==============================================================================
+
+# Standard library imports
 import ast
 import os
 import time
@@ -5,6 +15,7 @@ import struct
 from functools import partial
 import xml.etree.cElementTree as ET
 
+# Scientific computing imports
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from cycler import cycler
@@ -12,20 +23,27 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import math
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-
-
+# PySide6 (Qt) imports
 from PySide6.QtCore import Qt, QRect, QAbstractItemModel, Signal, QXmlStreamWriter, QXmlStreamReader, QItemSelectionModel
 from PySide6.QtCharts import QLineSeries, QChart, QChartView, QValueAxis
 from PySide6.QtGui import QStandardItem, QStandardItemModel, QPalette, QColor, QAction, QShortcut, QKeySequence, QIcon, QDoubleValidator, QValidator, QPen, QIntValidator
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QHBoxLayout, QVBoxLayout, QScrollArea, QSizePolicy, \
     QWidget, QSplitter, QFileDialog, QTabWidget, QColorDialog, QTableView, QStyledItemDelegate, QStyle, QToolButton, QStatusBar, QLabel, QMessageBox, QFileSystemModel, QLineEdit, QTreeWidget, QTreeWidgetItem, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsItem, QListWidget, QListWidgetItem, QFrame, QDialog, QCheckBox, QDialogButtonBox
-from scipy.spatial.transform import Rotation
 from PySide6.QtGui import QUndoCommand, QUndoStack
+
+# ==============================================================================
+# CONSTANTS
+# ==============================================================================
 
 VERSION = "2.0.4"
 CURRENT_PARTICLE_EFFECT_VERSION = 0x71
 VALID_PARTICLE_EFFECT_VERSIONS = [0x71, 0x6F, 0x6E, 0x6D]
+
+# ==============================================================================
+# UTILITY FUNCTIONS
+# ==============================================================================
 
 def clear_layout(layout):
     if layout is not None:
@@ -35,6 +53,10 @@ def clear_layout(layout):
                 item.widget().deleteLater()
             elif item.layout():
                 clear_layout(item.layout())
+
+# ==============================================================================
+# CORE DATA CLASSES - Particle System Components
+# ==============================================================================
 
 class EmitterPosition:
 
@@ -92,6 +114,10 @@ class EmitterRotation:
 
     def getOffset(self):
         return self.fileOffset
+
+# ==============================================================================
+# PARTICLE SYSTEM COMPONENTS
+# ==============================================================================
 
 class Visualizer:
     
@@ -439,6 +465,10 @@ class ParticleEffectVariable:
         self.y = 0
         self.z = 0
 
+# ==============================================================================
+# MAIN PARTICLE EFFECT CLASS
+# ==============================================================================
+
 CURRENT_PARTICLE_EFFECT_VERSION = 0x71
 
 class ParticleEffect:
@@ -532,6 +562,10 @@ class ParticleEffect:
             stream.seek(0)
             self.from_memory_stream(stream)
             self.version = 0x71
+
+# ==============================================================================
+# MEMORY STREAM UTILITY
+# ==============================================================================
 
 class MemoryStream:
     '''
@@ -644,6 +678,9 @@ class MemoryStream:
     def float32_read(self):
         return self.read_format('f', 4)
 
+# ==============================================================================
+# UI VIEW COMPONENTS
+# ==============================================================================
 
 class EmitterView(QWidget):
     
@@ -979,6 +1016,10 @@ def graphs_set_dark_mode():
 def graphs_set_light_mode():
     plt.style.use("default")
 
+# ==============================================================================
+# GRAPH VISUALIZATION COMPONENTS
+# ==============================================================================
+
 class GraphWidget(QWidget):
     
     def __init__(self):
@@ -1125,8 +1166,11 @@ class GraphView(QWidget):
         self.graphWidget.set_data(graph.x, graph.y)
         self.layout.addWidget(self.graphWidget)
         self.setLayout(self.layout)
-        
-        
+
+# ==============================================================================
+# UNDO/REDO SUPPORT
+# ==============================================================================
+
 class LifetimeView(QWidget):
     def __init__(self, particleEffect):
         pass
@@ -1209,6 +1253,10 @@ class ColorGradient:
     def getOffset(self):
         return self.fileOffset
 
+# ==============================================================================
+# DATA MODELS - Qt Models for table/tree views
+# ==============================================================================
+
 def find_all_occurrences(text, substring):
     indices = []
     start_index = 0
@@ -1219,6 +1267,10 @@ def find_all_occurrences(text, substring):
         indices.append(index)
         start_index = index + 1
     return indices
+
+# ==============================================================================
+# DATA MODELS - Qt Models for table/tree views
+# ==============================================================================
 
 class SizeModel(QStandardItemModel):
     def __init__(self, undo_stack=None):
@@ -1797,6 +1849,10 @@ class ColorSwatchDelegate(QStyledItemDelegate):
             else Qt.black
         )
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+
+# ==============================================================================
+# FILE MANAGEMENT COMPONENTS - Widgets for managing loaded particle files
+# ==============================================================================
         
 class LoadedFilesWindow(QWidget):
     
@@ -2515,6 +2571,10 @@ class LoadedFilesBar(QWidget):
         self.treeWidget.clear()
         self.fileData.clear()
 
+# ==============================================================================
+# MAIN APPLICATION WINDOW
+# ==============================================================================
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -3174,6 +3234,10 @@ def get_dark_mode_palette( app=None ):
     darkPalette.setColor( QPalette.Disabled, QPalette.HighlightedText, QColor( 127, 127, 127 ), )
 
     return darkPalette
+
+# ==============================================================================
+# APPLICATION ENTRY POINT
+# ==============================================================================
 
 if __name__ == "__main__":
     app = QApplication([])
