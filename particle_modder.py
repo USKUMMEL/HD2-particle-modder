@@ -37,9 +37,9 @@ from PySide6.QtGui import QUndoCommand, QUndoStack
 # CONSTANTS
 # ==============================================================================
 
-VERSION = "2.0.4"
-CURRENT_PARTICLE_EFFECT_VERSION = 0x71
-VALID_PARTICLE_EFFECT_VERSIONS = [0x71, 0x6F, 0x6E, 0x6D]
+VERSION = "2.0.9"
+CURRENT_PARTICLE_EFFECT_VERSION = 0x73
+VALID_PARTICLE_EFFECT_VERSIONS = [0x73, 0x72, 0x71, 0x6F, 0x6E, 0x6D]
 
 # ==============================================================================
 # UTILITY FUNCTIONS
@@ -119,6 +119,22 @@ class EmitterRotation:
 # PARTICLE SYSTEM COMPONENTS
 # ==============================================================================
 
+class VisualizerComponent:
+
+    def __init__(self):
+        self.component_type = 0
+        self.component_format = 0
+
+    def from_memory_stream(self, stream):
+        self.component_type = stream.uint32_read()
+        self.component_format = stream.uint32_read()
+        stream.advance(12)
+
+    def write_to_memory_stream(self, stream):
+        stream.write(struct.pack("<II", self.component_type, self.component_format))
+        stream.advance(12)
+
+
 class Visualizer:
     
     BILLBOARD = 0
@@ -128,59 +144,95 @@ class Visualizer:
     UNKNOWN4 = 4
     
     def __init__(self):
-        pass
+        self.components = []
+        self.num_components = 0
     
     def from_memory_stream(self, stream):
         self.visualizer_type = stream.uint32_read()
+        self.start = stream.tell()
+        self.end = stream.tell()
         if self.visualizer_type == Visualizer.BILLBOARD:
             self.unk1 = stream.uint32_read()
             self.unk2 = stream.uint32_read()
             self.material_id = stream.uint64_read()
+            self.start = stream.tell()
             self.data = stream.read(240)
+            self.end = stream.tell()
         elif self.visualizer_type == Visualizer.LIGHT:
             self.data = stream.read(256)
+            self.end = stream.tell()
         elif self.visualizer_type == Visualizer.MESH:
             self.unit_id = stream.uint64_read()
             self.mesh_id = stream.uint64_read()
             self.material_id = stream.uint64_read()
+            self.start = stream.tell()
             self.data = stream.read(224)
+            self.end = stream.tell()
         elif self.visualizer_type == Visualizer.UNKNOWN3:
             self.unk1 = stream.uint32_read()
             self.unk2 = stream.uint32_read()
             self.material_id = stream.uint64_read()
+            self.start = stream.tell()
             self.data = stream.read(232)
+            self.end = stream.tell()
         elif self.visualizer_type == Visualizer.UNKNOWN4:
             self.material_id = stream.uint64_read()
+            self.start = stream.tell()
             self.data = stream.read(248)
+            self.end = stream.tell()
+        stream.seek(self.start)
+        self.num_components = stream.uint32_read()
+        self.components = []
+        for _ in range(self.num_components):
+            component = VisualizerComponent()
+            component.from_memory_stream(stream)
+            self.components.append(component)
+        stream.seek(self.end)
             
     def write_to_memory_stream(self, stream):
         if self.visualizer_type == Visualizer.BILLBOARD:
-            data = struct.pack("<IIIQ", self.visualizer_type, self.unk1, self.unk2, self.material_id) + self.data
+            data = struct.pack("<IIIQ", self.visualizer_type, self.unk1, self.unk2, self.material_id)
             stream.write(data)
         elif self.visualizer_type == Visualizer.LIGHT:
-            data = struct.pack("<I", self.visualizer_type) + self.data
+            data = struct.pack("<I", self.visualizer_type)
             stream.write(data)
         elif self.visualizer_type == Visualizer.MESH:
-            data = struct.pack("<IQQQ", self.visualizer_type, self.unit_id, self.mesh_id, self.material_id) + self.data
+            data = struct.pack("<IQQQ", self.visualizer_type, self.unit_id, self.mesh_id, self.material_id)
             stream.write(data)
         elif self.visualizer_type == Visualizer.UNKNOWN3:
-            data = struct.pack("<IIIQ", self.visualizer_type, self.unk1, self.unk2, self.material_id) + self.data
+            data = struct.pack("<IIIQ", self.visualizer_type, self.unk1, self.unk2, self.material_id)
             stream.write(data)
         elif self.visualizer_type == Visualizer.UNKNOWN4:
-            data = struct.pack("<IQ", self.visualizer_type, self.material_id) + self.data
+            data = struct.pack("<IQ", self.visualizer_type, self.material_id)
             stream.write(data)
+        start = stream.tell()
+        stream.write(self.data)
+        end = stream.tell()
+        stream.seek(start+4)
+        for component in self.components:
+            component.write_to_memory_stream(stream)
+        stream.seek(end)
         
 class Graph:
-    def __init__(self):
-        pass
+    def __init__(self, layers = 1):
+        self.num_layers = layers
+        self.extra_layers = []
         
     def from_memory_stream(self, stream):
         self.x = [stream.float32_read() for _ in range(10)]
         self.y = [stream.float32_read() for _ in range(10)]
+        for _ in range(self.num_layers - 1):
+            layer_x = [stream.float32_read() for _ in range(10)]
+            layer_y = [stream.float32_read() for _ in range(10)]
+            self.extra_layers.append((layer_x, layer_y))
         
     def write_to_memory_stream(self, stream):
         stream.write(struct.pack("<ffffffffff", *self.x))
         stream.write(struct.pack("<ffffffffff", *self.y))
+        for i in range(self.num_layers - 1):
+            layer = self.extra_layers[i]
+            stream.write(struct.pack("<ffffffffff", *layer[0]))
+            stream.write(struct.pack("<ffffffffff", *layer[1]))
         
 class ColorGraph:
     def __init__(self):
@@ -355,8 +407,7 @@ class ParticleSystem:
             if component_type[0] == 0x04 and component_type[1] >= 0x20: # graph
                 stream.advance(4)
                 self.other_graph_offsets.append(stream.tell() - self.offset)
-                unk_graph = Graph()
-                unk_graph.from_memory_stream(stream)
+                unk_graph = Graph(2)
                 unk_graph.from_memory_stream(stream)
                 self.other_graphs.append(unk_graph)
                 stream.advance(8) # unknown data
@@ -364,12 +415,10 @@ class ParticleSystem:
                 # color graph
                 stream.advance(-4)
                 self.color_graph_offsets.append(stream.tell() - self.offset)
-                scale = Graph()
-                scale.from_memory_stream(stream)
+                scale = Graph(2)
                 scale.from_memory_stream(stream)
                 self.scale_graphs.append(scale)
-                opacity = Graph()
-                opacity.from_memory_stream(stream)
+                opacity = Graph(2)
                 opacity.from_memory_stream(stream)
                 self.opacity_graphs.append(opacity)
                 color = ColorGraph()
@@ -378,12 +427,10 @@ class ParticleSystem:
                 stream.advance(16) # unknown data
             elif component_type[1] == 0x05 and component_type[2] >= 0x20: # color graph
                 self.color_graph_offsets.append(stream.tell() - self.offset)
-                scale = Graph()
-                scale.from_memory_stream(stream)
+                scale = Graph(2)
                 scale.from_memory_stream(stream)
                 self.scale_graphs.append(scale)
-                opacity = Graph()
-                opacity.from_memory_stream(stream)
+                opacity = Graph(2)
                 opacity.from_memory_stream(stream)
                 self.opacity_graphs.append(opacity)
                 color = ColorGraph()
@@ -394,11 +441,8 @@ class ParticleSystem:
                 stream.advance(-4)
                 self.color_graph_offsets.append(stream.tell() - self.offset)
                 scale = None
-                #scale.from_memory_stream(stream)
-                #scale.from_memory_stream(stream)
                 self.scale_graphs.append(scale)
-                opacity = Graph()
-                opacity.from_memory_stream(stream)
+                opacity = Graph(2)
                 opacity.from_memory_stream(stream)
                 self.opacity_graphs.append(opacity)
                 color = ColorGraph()
@@ -448,13 +492,10 @@ class ParticleSystem:
             stream.seek(offset + self.offset)
             if self.scale_graphs[index] is not None:
                 self.scale_graphs[index].write_to_memory_stream(stream)
-                self.scale_graphs[index].write_to_memory_stream(stream)
-            self.opacity_graphs[index].write_to_memory_stream(stream)
             self.opacity_graphs[index].write_to_memory_stream(stream)
             self.color_graphs[index].write_to_memory_stream(stream)
         for index, offset in enumerate(self.other_graph_offsets):
             stream.seek(offset + self.offset)
-            self.other_graphs[index].write_to_memory_stream(stream)
             self.other_graphs[index].write_to_memory_stream(stream)
         
         
@@ -465,11 +506,13 @@ class ParticleEffectVariable:
         self.y = 0
         self.z = 0
 
+
+class ParticleParseException(Exception):
+    pass
+
 # ==============================================================================
 # MAIN PARTICLE EFFECT CLASS
 # ==============================================================================
-
-CURRENT_PARTICLE_EFFECT_VERSION = 0x71
 
 class ParticleEffect:
     def __init__(self):
@@ -486,14 +529,20 @@ class ParticleEffect:
         self.particle_systems.clear()
         self.version = stream.uint32_read()
         if self.version not in VALID_PARTICLE_EFFECT_VERSIONS:
-            return
+            error_message_box = QMessageBox()
+            error_message_box.setText(f"Particle file version not recognized ({hex(self.version)}). Unable to load file.")
+            error_message_box.setWindowTitle(f"HD2 Particle Modder - Version {VERSION}")
+            error_message_box.setWindowIcon(QIcon("assets/icon.png"))
+            error_message_box.setIcon(QMessageBox.Icon.Critical)
+            error_message_box.exec()
+            raise ParticleParseException()
         self.min_lifetime = stream.float32_read()
         self.max_lifetime = stream.float32_read()
         stream.advance(8)
         self.num_variables = stream.uint32_read()
         self.num_particle_systems = stream.uint32_read()
         stream.advance(44)
-        if self.version in [0x6F, 0x71]:
+        if self.version in [0x6F, 0x71, 0x72, 0x73]:
             stream.advance(8)
         for _ in range(self.num_variables):
             new_var = ParticleEffectVariable()
@@ -515,7 +564,7 @@ class ParticleEffect:
         stream.advance(8)
         stream.write(self.num_variables.to_bytes(4, byteorder="little"))
         stream.write(self.num_particle_systems.to_bytes(4, byteorder="little"))
-        if self.version in [0x6F, 0x71]:
+        if self.version in [0x6F, 0x71, 0x72, 0x73]:
             stream.advance(52)
         else: # insert 8 bytes to match version 0x6F
             stream.advance(44)
@@ -527,10 +576,17 @@ class ParticleEffect:
             stream.write(struct.pack("<I", variable.name_hash))
         for variable in self.variables:
             stream.write(struct.pack("<fff", variable.x, variable.y, variable.z))
+        if self.version < 0x73:
+            for particle_system in self.particle_systems:
+                if particle_system.visualizer == None:
+                    continue
+                for v_component in particle_system.visualizer.components:
+                    if v_component.component_format > 16:
+                        v_component.component_format += 4
         for particle_system in self.particle_systems:
             stream.seek(particle_system.offset)
             particle_system.write_to_memory_stream(stream)
-        if self.version != 0x71 and len(self.particle_systems) > 0:
+        if self.version < 0x71 and len(self.particle_systems) > 0:
             updated_offset = 0
             for particle_system in self.particle_systems:
                 if particle_system.is_rendering():
@@ -558,10 +614,10 @@ class ParticleEffect:
                         stream.seek(particle_system.offset + updated_offset + particle_system.emitter_offset + 8)
                         stream.data[stream.tell():stream.tell()] = b'\xFF\xFF\xFF\xFF'
                         updated_offset += 4
-        if self.version != 0x71:
+        if self.version != CURRENT_PARTICLE_EFFECT_VERSION:
             stream.seek(0)
             self.from_memory_stream(stream)
-            self.version = 0x71
+            self.version = CURRENT_PARTICLE_EFFECT_VERSION
 
 # ==============================================================================
 # MEMORY STREAM UTILITY
@@ -3100,8 +3156,11 @@ class MainWindow(QMainWindow):
                     with open(filepath, 'rb') as f:
                         fileData = MemoryStream(f.read())
                     particleEffect = ParticleEffect()
-                    particleEffect.from_memory_stream(fileData)
-                    self.addLoadedFile(filepath, fileData, particleEffect, note)
+                    try:
+                        particleEffect.from_memory_stream(fileData)
+                        self.addLoadedFile(filepath, fileData, particleEffect, note)
+                    except ParticleParseException:
+                        pass
                 break
             
     def closeAllFiles(self):
@@ -3137,7 +3196,10 @@ class MainWindow(QMainWindow):
             with open(current_file, "rb") as f:
                 particleEffectData = MemoryStream(f.read())
             particleEffect = ParticleEffect()
-            particleEffect.from_memory_stream(particleEffectData)
+            try:
+                particleEffect.from_memory_stream(particleEffectData)
+            except ParticleParseException:
+                continue
             
             # Only set as current effect for the first file or last file
             if idx == len(archive_files) - 1:
