@@ -10,8 +10,8 @@ __pycache__/
 # Build directories
 build/
 dist/
+build.bat
 *.spec
-!HD2_Particle_Modder.spec
 
 # IDE
 .vscode/
