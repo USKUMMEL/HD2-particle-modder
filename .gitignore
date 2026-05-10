@@ -11,6 +11,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!HD2_Particle_Modder.spec
 
 # IDE
 .vscode/
